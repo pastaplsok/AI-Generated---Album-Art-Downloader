@@ -63,7 +63,7 @@ CACHE_FILE = Path(__file__).parent / "fetch_album_art_cache.txt"
 # Lower the number if too many good results are being filtered; raise it
 # to be stricter. Set to 0 to disable matching entirely.
 # ---------------------------------------------------------------------------
-MATCH_THRESHOLD = 60
+MATCH_THRESHOLD = 50
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -360,7 +360,10 @@ def review_match(search_label: str, results: list, folder: Path, existing_res: i
     probed: dict[int, int] = {}
 
     total = len(results)
-    for i, match in enumerate(results):
+    i = 0
+    while 0 <= i < total:
+        match = results[i]
+
         # Probe Apple resolution for this result if not already done
         if i not in probed:
             probed[i] = probe_apple_resolution(match["art_url"])
@@ -388,15 +391,22 @@ def review_match(search_label: str, results: list, folder: Path, existing_res: i
         webbrowser.open(match["preview_url"])
         print()
 
-        is_last = (i == total - 1)
-        if is_last:
-            prompt = "  [Y]es / [O]pen folder / [S]kip album / [Q]uit : "
-            valid  = ("y", "o", "s", "q")
-            hint   = "  Please press Y, O, S, or Q."
-        else:
-            prompt = "  [Y]es / [N]ext result / [O]pen folder / [S]kip album / [Q]uit : "
-            valid  = ("y", "n", "o", "s", "q")
-            hint   = "  Please press Y, N, O, S, or Q."
+        is_first = (i == 0)
+        is_last  = (i == total - 1)
+
+        # Build prompt and valid keys based on position in the list
+        options = ["[Y]es"]
+        valid   = ["y"]
+        if not is_last:
+            options.append("[N]ext result")
+            valid.append("n")
+        if not is_first:
+            options.append("[B]ack")
+            valid.append("b")
+        options += ["[O]pen folder", "[S]kip album", "[Q]uit"]
+        valid   += ["o", "s", "q"]
+        prompt = "  " + " / ".join(options) + " : "
+        hint   = f"  Please press {', '.join(v.upper() for v in valid if v != 'o')} or O."
 
         while True:
             raw = input(prompt).strip().lower()
@@ -414,7 +424,10 @@ def review_match(search_label: str, results: list, folder: Path, existing_res: i
             return "s", None
         if raw == "q":
             return "q", None
-        # raw == "n": loop to next result
+        if raw == "n":
+            i += 1
+        elif raw == "b":
+            i -= 1
 
     # Exhausted all results without accepting
     print("  No more results for this album.")
