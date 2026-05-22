@@ -55,11 +55,22 @@ COVER_FILENAME = "cover.jpg"
 CACHE_FILE = Path(__file__).parent / "fetch_album_art_cache.txt"
 
 # ---------------------------------------------------------------------------
+# Name-matching threshold (0–100).
+# Results from Apple where the artist OR album name similarity falls below
+# this value are silently filtered out before review.
+# 60 = lenient enough to allow Deluxe/Remaster editions through while
+#      filtering out genuinely wrong artists or album titles.
+# Lower the number if too many good results are being filtered; raise it
+# to be stricter. Set to 0 to disable matching entirely.
+# ---------------------------------------------------------------------------
+MATCH_THRESHOLD = 60
+
+# ---------------------------------------------------------------------------
 # Logging setup
 # ---------------------------------------------------------------------------
 log_path = Path(__file__).parent / "fetch_album_art.log"
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s  %(levelname)-7s  %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[
@@ -68,6 +79,9 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger(__name__)
+# Console shows INFO and above; log file captures DEBUG (filtered results etc.)
+logging.getLogger().handlers[0].setLevel(logging.DEBUG)
+logging.getLogger().handlers[1].setLevel(logging.INFO)
 
 # ---------------------------------------------------------------------------
 # Lazy imports for mutagen (gives a friendly error if not installed)
@@ -510,6 +524,58 @@ def probe_apple_resolution(art_url: str) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Name matching
+# ---------------------------------------------------------------------------
+
+def name_similarity(a: str, b: str) -> int:
+    """
+    Return a 0–100 similarity score between two strings.
+    Comparison is case-insensitive and ignores common noise words like
+    'the', 'a', 'an' so e.g. 'The Beatles' matches 'Beatles' well.
+    Also strips content in parentheses/brackets so 'Abbey Road (Remaster)'
+    still matches 'Abbey Road' cleanly.
+    """
+    import difflib
+    import re
+
+    def normalise(s: str) -> str:
+        s = s.lower()
+        s = re.sub(r"[\(\[\{][^\)\]\}]*[\)\]\}]", "", s)  # strip (Remaster) etc.
+        s = re.sub(r"\b(the|a|an)\b", "", s)               # strip noise words
+        s = re.sub(r"[^a-z0-9\s]", "", s)                  # strip punctuation
+        return s.strip()
+
+    na, nb = normalise(a), normalise(b)
+    if not na or not nb:
+        return 0
+    ratio = difflib.SequenceMatcher(None, na, nb).ratio()
+    return int(ratio * 100)
+
+
+def filter_results_by_name(results: list, artist: str, album: str) -> list:
+    """
+    Filter Apple results to those where the matched artist AND album name
+    both meet MATCH_THRESHOLD.  If MATCH_THRESHOLD is 0, returns all results.
+    Results that don't meet the threshold are logged as filtered.
+    """
+    if MATCH_THRESHOLD == 0 or (not artist and not album):
+        return results
+
+    filtered = []
+    for r in results:
+        artist_score = name_similarity(artist or "", r["matched_artist"]) if artist else 100
+        album_score  = name_similarity(album  or "", r["matched_album"])  if album  else 100
+        if artist_score >= MATCH_THRESHOLD and album_score >= MATCH_THRESHOLD:
+            filtered.append(r)
+        else:
+            log.debug(
+                f"  Filtered out: {r['matched_artist']} — {r['matched_album']} "
+                f"(artist {artist_score}%, album {album_score}%)"
+            )
+    return filtered
+
+
+# ---------------------------------------------------------------------------
 # Processed-folder cache
 # ---------------------------------------------------------------------------
 
@@ -630,6 +696,14 @@ def scan_library(root: Path):
         results = search_apple(artist or "", album or "")
         if not results:
             log.warning(f"  No results found on Apple for: {search_label}")
+            save_cache_entry(folder)
+            failed += 1
+            continue
+
+        # Filter results by name similarity before review
+        results = filter_results_by_name(results, artist or "", album or "")
+        if not results:
+            log.warning(f"  All Apple results filtered out (name mismatch) for: {search_label}")
             save_cache_entry(folder)
             failed += 1
             continue
